@@ -11,9 +11,6 @@
 #include <omp.h>
 #endif
 
-#define SIZE 4
-#define THREADS 2
-
 std::default_random_engine generator;
 
 template <typename T, size_t N = SIZE>
@@ -97,10 +94,10 @@ Matrix<T, K> MultiplyHelper<T, N, K>::mul(const Matrix<T, K>& lhs, const Matrix<
   auto lhs_21 = lhs.template submatrix<K/2>(K/2, 0);
   auto lhs_22 = lhs.template submatrix<K/2>(K/2, K/2);
 
-  auto rhs_11 = lhs.template submatrix<K/2>(0, 0);
-  auto rhs_12 = lhs.template submatrix<K/2>(0, K/2);
-  auto rhs_21 = lhs.template submatrix<K/2>(K/2, 0);
-  auto rhs_22 = lhs.template submatrix<K/2>(K/2, K/2);
+  auto rhs_11 = rhs.template submatrix<K/2>(0, 0);
+  auto rhs_12 = rhs.template submatrix<K/2>(0, K/2);
+  auto rhs_21 = rhs.template submatrix<K/2>(K/2, 0);
+  auto rhs_22 = rhs.template submatrix<K/2>(K/2, K/2);
 
   Matrix<T, K/2> block_ul = MultiplyHelper<T, N, K/2>::mul(lhs_11, rhs_11) + MultiplyHelper<T, N, K/2>::mul(lhs_12, rhs_21);
   Matrix<T, K/2> block_ur = MultiplyHelper<T, N, K/2>::mul(lhs_11, rhs_12) + MultiplyHelper<T, N, K/2>::mul(lhs_12, rhs_22);
@@ -125,9 +122,9 @@ public:
   Matrix<T, N> multiply(const Matrix<T, N>& lhs, const Matrix<T, N>& rhs) override final;
 
 private:
-  Matrix<T, N>* m_lhs;
-  Matrix<T, N>* m_rhs;
-  Matrix<T, N>* m_output;
+  const Matrix<T, N>* m_lhs;
+  const Matrix<T, N>* m_rhs;
+  Matrix<T, N> m_output;
 
   void mul(size_t slice);
 };
@@ -137,20 +134,19 @@ MultiThreadStrategy<T, N>::MultiThreadStrategy()
   : Strategy<T, N>()
   , m_lhs(nullptr)
   , m_rhs(nullptr)
-  , m_output(new Matrix<T, N>()) {
+  , m_output() {
 }
 
 template <typename T, size_t N>
 MultiThreadStrategy<T, N>::~MultiThreadStrategy() {
-  delete m_lhs;  m_lhs = nullptr;
-  delete m_rhs;  m_rhs = nullptr;
-  delete m_output;  m_output = nullptr;
+  m_lhs = nullptr;
+  m_rhs = nullptr;
 }
 
 template <typename T, size_t N>
 Matrix<T, N> MultiThreadStrategy<T, N>::multiply(const Matrix<T, N>& lhs, const Matrix<T, N>& rhs) {
-  m_lhs = new Matrix<T, N>(lhs);  // use copy constructor
-  m_rhs = new Matrix<T, N>(rhs);  // use copy constructor
+  m_lhs = &lhs;
+  m_rhs = &rhs;
 
   std::vector<std::thread> threads;
   for (size_t slice = 0; slice < THREADS; ++slice) {
@@ -159,8 +155,7 @@ Matrix<T, N> MultiThreadStrategy<T, N>::multiply(const Matrix<T, N>& lhs, const 
   for (auto& worker_thread : threads) {
     worker_thread.join();
   }
-  Matrix<T, N> result = *m_output;
-  return result;
+  return m_output;
 }
 
 template <typename T, size_t N>
@@ -171,8 +166,9 @@ void MultiThreadStrategy<T, N>::mul(size_t slice) {
 
   for (i = from; i < to; ++i) {
     for (j = 0; j < N; ++j) {
+      m_output[i][j] = T();
       for (k = 0; k < N; ++k) {
-        (*m_output)[i][j] += (*m_lhs)[i][k] * (*m_rhs)[k][j];
+        m_output[i][j] += (*m_lhs)[i][k] * (*m_rhs)[k][j];
       }
     }
   }
@@ -195,9 +191,11 @@ Matrix<T, N> OpenMPStrategy<T, N>::multiply(const Matrix<T, N>& lhs, const Matri
 #pragma omp parallel for private (i, j, k) num_threads(THREADS)
   for (i = 0; i < N; ++i) {
     for (j = 0; j < N; ++j) {
+      T sum = T();
       for (k = 0; k < N; ++k) {
-        result[i][j] += lhs[i][k] * rhs[k][j];
+        sum += lhs[i][k] * rhs[k][j];
       }
+      result[i][j] = sum;
     }
   }
   return result;
@@ -233,12 +231,7 @@ private:
 template <typename T, size_t N>
 StrategyFactory<T, N>::StrategyFactory() {
   m_map["brute-force"] = new BruteForceStrategy<T, N>();
-  if (N % 2 == 0) {
-    m_map["recursive"] = new RecursiveStrategy<T, N>();
-  } else {
-    printf("Recursive strategy cannot be applied to odd N: %lu", N);
-    m_map["recursive"] = nullptr;  // recursive strategy cannot be applied to odd N
-  }
+  m_map["recursive"] = new RecursiveStrategy<T, N>();
   m_map["multi-thread"] = new MultiThreadStrategy<T, N>();
 #ifdef _OPENMP
   m_map["openmp"] = new OpenMPStrategy<T, N>();
@@ -286,7 +279,7 @@ public:
   Matrix operator + (const Matrix& rhs) const;
   Matrix operator * (const Matrix& rhs) const;
 
-  void print() const;
+  void print(size_t size = 4) const;
 
   template <size_t K>
   Matrix<T, K> submatrix(size_t i, size_t j) const;
@@ -377,11 +370,27 @@ Matrix<T, N> Matrix<T, N>::createRandom(T low, T high) {
   return matrix;
 }
 
+template <typename T>
+bool equal(const T& lhs, const T& rhs) {
+  std::equal_to<T> e;
+  return e(lhs, rhs);
+}
+
+template <>
+bool equal<double>(const double& lhs, const double& rhs) {
+  return std::fabs(lhs - rhs) < 0.000001;
+}
+
+template <>
+bool equal<float>(const float& lhs, const float& rhs) {
+  return std::fabs(lhs - rhs) < 0.0001f;
+}
+
 template <typename T, size_t N>
 bool Matrix<T, N>::operator == (const Matrix& rhs) const {
   for (size_t row = 0; row < N; ++row) {
     for (size_t col = 0; col < N; ++col) {
-      if ((*this)[row][col] != rhs[row][col]) {
+      if (!equal((*this)[row][col], rhs[row][col])) {
         return false;
       }
     }
@@ -407,13 +416,15 @@ Matrix<T, N> Matrix<T, N>::operator + (const Matrix<T, N>& rhs) const {
 
 // ----------------------------------------------
 template <typename T, size_t N>
-void Matrix<T, N>::print() const {
-  for (size_t row = 0; row < N; ++row) {
-    for (size_t col = 0; col < N; ++col) {
-      printf("%.2lf ", static_cast<double>(m_data[row][col]));
+void Matrix<T, N>::print(size_t size) const {
+  size = size > N ? N : size;
+  for (size_t row = 0; row < size; ++row) {
+    for (size_t col = 0; col < size; ++col) {
+      printf("%.4lf ", static_cast<double>(m_data[row][col]));
     }
     printf("\n");
   }
+  printf("\n");
 }
 
 // ----------------------------------------------
@@ -480,14 +491,17 @@ Matrix<T, N> Matrix<T, N>::multiply(const Matrix<T, N>& lhs, const Matrix<T, N>&
 
 /* Main */
 // ---------------------------------------
+// Compile: g++ -std=c++11 -fopenmp -DSIZE=128 -DTHREADS=2 -DRECURSIVE=true -DTBB=true matmul.cpp -o matmul
+// Run: ./matmul
+
 int main(int argc, char** argv) {
   clock_t start = clock();
   clock_t elapsed = start;
 
   auto A = Matrix<double>::createRandom(0.0, 1.0);
   auto B = Matrix<double>::createRandom(0.0, 1.0);
-  A.print();  printf("\n\n");
-  B.print();  printf("\n\n");
+  A.print();  printf("\n");
+  B.print();  printf("\n");
 
   // setting multiplication Strategy
   StrategyFactory<double, Matrix<double>::Size> factory;
@@ -498,10 +512,11 @@ int main(int argc, char** argv) {
   auto C = A * B;
   elapsed = clock() - start;
   printf("Brute-Force strategy, time elapsed: %lf\n", static_cast<double>(elapsed) / CLOCKS_PER_SEC);
-  C.print();  printf("\n\n");
+  C.print();  printf("\n");
   factory.release(g_Strategy);
 
   //---------------------------------------------
+#if RECURSIVE
   g_Strategy = factory.create("recursive");
   start = clock();
   auto D = A * B;
@@ -511,8 +526,9 @@ int main(int argc, char** argv) {
   if (C != D) {
     printf("ERROR!!! Recursive\n");
   }
-  printf("\n\n");
+  printf("\n");
   factory.release(g_Strategy);
+#endif
 
   //---------------------------------------------
   g_Strategy = factory.create("multi-thread");
@@ -524,10 +540,11 @@ int main(int argc, char** argv) {
   if (C != F) {
     printf("ERROR!!! Multithread\n");
   }
-  printf("\n\n");
+  printf("\n");
   factory.release(g_Strategy);
 
   //---------------------------------------------
+#ifdef _OPENMP
   g_Strategy = factory.create("openmp");
   start = clock();
   auto G = A * B;
@@ -537,10 +554,12 @@ int main(int argc, char** argv) {
   if (C != G) {
     printf("ERROR!!! OpenMP\n");
   }
-  printf("\n\n");
+  printf("\n");
   factory.release(g_Strategy);
+#endif
 
   //---------------------------------------------
+#if TBB
   g_Strategy = factory.create("tbb");
   start = clock();
   auto H = A * B;
@@ -550,8 +569,10 @@ int main(int argc, char** argv) {
   if (C != H) {
     printf("ERROR!!! TBB\n");
   }
-  printf("\n\n");
+  printf("\n");
   factory.release(g_Strategy);
+#endif
+
   return 0;
 }
 
